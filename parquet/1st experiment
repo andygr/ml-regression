@@ -1,0 +1,250 @@
+# This code is using Mixed Floating point with batch size 256 and 1024 neurons 
+# Import libraries 
+import math 
+import keras
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import tensorflow as tf
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pickle
+
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn import metrics
+from joblib import dump, load
+from datetime import datetime
+
+from tensorflow.keras import Sequential, callbacks
+from tensorflow.keras.models import load_model
+from tensorflow.keras.optimizers import SGD, Adam
+from tensorflow.keras.layers import Dense, Dropout, Activation
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras import mixed_precision
+from keras.layers import Input, Dense
+from keras.models import Model
+
+pd.set_option('display.max_rows',30)
+%matplotlib inline
+
+#Import Comet library and setup the experiment. This will require to install Code Carbon via Conda
+from comet_ml import Experiment  # isort:skip
+experiment = Experiment(api_key="Need to enter the API key")
+
+# Setup the dtype policy for mixed precision
+policy = mixed_precision.Policy('mixed_float16')
+mixed_precision.set_global_policy(policy)
+
+# Check the dtype policy, should be 16 for computation and 32 for variables
+print('Compute dtype: %s' % policy.compute_dtype)
+print('Variable dtype: %s' % policy.variable_dtype)
+
+# Create Parquet format
+# Read CSV file into a Pandas DataFrame
+df = pd.read_csv('C:\\Users\\andy\\Desktop\\Artefacts\\Dataset\\Regression\\Cars\\vehicles-150K.csv')
+t1 = datetime.now()
+
+# Convert Pandas DataFrame to PyArrow Table
+table = pa.Table.from_pandas(df)
+
+# Write PyArrow Table to Parquet file
+pq.write_table(table, 'C:\\Users\\andy\\Desktop\\Artefacts\\Dataset\\Regression\\Cars\\Parquet\\Experiment\\Mixed Precision with batch size 256\\vehicles-150K.parquet')
+t2 = datetime.now()
+
+# Open the Parquet file
+table = pq.read_table('C:\\Users\\andy\\Desktop\\Artefacts\\Dataset\\Regression\\Cars\\Parquet\\Experiment\\Mixed Precision with batch size 256\\vehicles-150K.parquet')
+
+# Convert the table to a Pandas DataFrame
+df = table.to_pandas()
+
+# Calculate the time took to convert CSV to Parquet
+took = t2 - t1
+print(f"it took {took} seconds to write csv to parquet.")
+
+# Return the description of the data in the DataFrame
+# also change from scientific notation to decimal
+pd.options.display.float_format = '{:,.1f}'.format
+df.describe()
+
+# Display the DataFrame information
+# There are some missing values that will need to remove
+df.info()
+
+# Display a specified number of rows, string from the top
+# There are some columns which aren't related to the car info and will remove them
+df.head()
+
+# Will need to check the outliers for the price
+fig, ax = plt.subplots(figsize=(10,2))
+ax.set_title('Box plot of the prices')
+sns.boxplot(x='price', data = df)
+
+# Remove the outliers for the price
+Q1 = df['price'].quantile(0.25)
+Q3 = df['price'].quantile(0.75)
+IQR = Q3 - Q1
+filter = (df['price'] >= Q1 - 1.5 * IQR) & (df['price'] <= Q3 + 1.5 *IQR)
+init_size = df.count()['id']
+df = df.loc[filter]  
+filtered_size = df.count()['id']
+print(init_size-filtered_size,'(', '{:.2f}'.format(100*(init_size-filtered_size)/init_size), '%',')', 'outliers removed from dataset')
+
+# Distribution values for the car prices
+fig, ax = plt.subplots(figsize=(10,5))
+ax.set_title('Distribution of the prices')
+sns.distplot(df['price'], bins=30, kde=False)
+
+# Setup a min value for the cars to remove free cars
+df = df[df['price']>600]
+
+# Check the odometer outliers
+fig, axs = plt.subplots(2, figsize=(20,10))
+sns.distplot(df['odometer'], ax = axs[0])
+axs[0].set_title('Distribution of the odometer')
+axs[1].set_title('Box plot of the odometer')
+sns.boxplot(x='odometer', data = df, ax=axs[1])
+
+# Removing odometer outliers
+Q1 = df['odometer'].quantile(0.25)
+Q3 = df['odometer'].quantile(0.75)
+IQR = Q3 - Q1
+filter = (df['odometer'] <= Q3 + 3 *IQR)
+init_size = df.count()['id']
+df = df.loc[filter]  
+filtered_size = df.count()['id']
+print(init_size-filtered_size,'(', '{:.2f}'.format(100*(init_size-filtered_size)/init_size), '%',')', 'outliers removed from dataset')
+
+# Display the head of the DataFrame information
+df.head()
+
+# Drop columns which aren't related to the car sales
+df = df.drop(columns = ['id', 'url', 'region', 'region_url', 'manufacturer', 'title_status', 'VIN', 'image_url', 'description', 'county', 'state', 'long', 'lat', 'posting_date'])
+
+# Check the DataFrame
+df.head()
+
+# Check for null values
+fig, ax = plt.subplots(figsize=(8,6))
+ax.set_title('Distribution of the missing values (yellow records)')
+sns.heatmap(df.isnull(),yticklabels=False,cbar=False,cmap='viridis')
+
+# Drop a column with many empty values
+df = df.drop(columns = ['size'])
+
+# For columns with less empty values, remove the corresponding rows
+rm_rows = ['year', 'model', 'fuel', 'transmission', 'drive', 'type', 'paint_color']
+for column in rm_rows:
+    df = df[~df[column].isnull()]
+
+# For everything else add the values null
+df = df.replace(np.nan, 'null', regex=True)
+
+# Display the head of the DataFrame information
+df.head()
+
+# Check for missing values 
+df.info()
+fig, ax = plt.subplots(figsize=(8,6))
+ax.set_title('Distribution of the missing values (yellow records)')
+sns.heatmap(df.isnull(),yticklabels=False,cbar=False,cmap='viridis')
+
+# Visualise the data after the pre-processing
+fig, axs = plt.subplots(2, figsize=(14, 10))
+axs[0].set_title('Box plot of the prices')
+sns.boxplot(x='price', data = df, ax = axs[0])
+axs[1].set_title('Distribution of the prices')
+sns.distplot(df['price'], ax=axs[1], bins=30, kde=False)
+
+# Display the DataFrame information
+df.info()
+
+# Display the head of the DataFrame information
+df.head()
+
+# Transfor string values to numeric
+cate_Columns = ['model', 'condition', 'cylinders', 'fuel', 'transmission', 'drive', 'type', 'paint_color']
+for column in cate_Columns:
+    column = pd.get_dummies(df[column],drop_first=True)
+    df = pd.concat([df,column],axis=1)
+df = df.drop(columns = cate_Columns)
+
+
+# Convert false and true to 0 and 1
+df.replace({False: 0, True: 1}, inplace=True)
+
+# Normalise the values for the numerical features
+std_scaler = StandardScaler()
+
+for column in ['year', 'odometer']:
+    df[column] = std_scaler.fit_transform(df[column].values.reshape(-1,1))
+
+# Display the head of the DataFrame information
+df.head()
+
+# Display the DataFrame information
+df.info()
+
+# Before execute this command will need to collect the power consumption data and record it in the excel
+# in the Before Model Training table. As well as the utilisation and data from the wattmeter
+# Split training and testing set
+x_train, x_test, y_train, y_test = train_test_split(df.drop('price',axis=1), df['price'], test_size=0.2, random_state=42)
+
+# MLP - Fully Connected Neuron Network using Keras and Functional API model
+inputs = Input(shape=x_train.shape[1])
+
+# Define 1 hidden layers with 1024 neurons each and ReLU activation
+x = Dense(1024, activation='relu')(inputs)
+
+# Define output layer with 1 neuron and linear activation with float 32
+outputs = Dense(1, activation='linear', dtype=tf.float32)(x)
+
+# Create model
+nn_model = Model(inputs=inputs, outputs=outputs)
+
+# Define optimiser and LR
+opt = keras.optimizers.Adam(learning_rate=0.01)
+
+# Define the validation metrics to be mean squared error and mean absolute error
+nn_model.compile(loss='mean_squared_error', optimizer=opt, metrics=['mae', 'mse'])
+
+# Visualise the model
+# Must install pydot (`pip install pydot`) and 
+# install graphviz for plot_model to work.
+keras.utils.plot_model(nn_model, "C:\\Users\\andy\\Desktop\\Artefacts\\Experiment\\Regression\\Parquet\\Mixed Precision and batch size 256\\Visualise Model\\experiment_regression.png")
+
+# After executing this command, wait to reach 200 epochs and collect the power consumption data and record in the 
+# During Model Training table, as well as utilisation and data from wattmeter 
+# Train the model    
+history = nn_model.fit(x_train, y_train, batch_size=256, epochs=1500 ,verbose=1)   
+
+# Save the model
+nn_model.save('C:\\Users\\andy\\Desktop\\Artefacts\\Experiment\\Regression\\Parquet\\Mixed Precision and batch size 256\\Model\\mixed_batch_model_256.h5')
+
+# Configure predictions
+nn_predict = nn_model.predict(x_test)
+
+nn_rmse = math.sqrt(metrics.mean_squared_error(y_test, nn_predict))
+nn_r2 = metrics.r2_score(y_test, nn_predict)
+
+print('For the MLP model, the root mean square error for the testing set is:', nn_rmse)
+print('The r2 score for the testing set is:', nn_r2)
+
+fig, ax = plt.subplots(figsize=(20,15))
+ax.set_title('Comparison between predicted prices and actual prices in testing set, MLP')
+plt.scatter(y_test, nn_predict)
+
+# Print out the training history
+results = pd.DataFrame(history.history)
+print(results)
+
+#plot the loss and validation loss of the dataset
+history_df = pd.DataFrame(history.history)
+plt.plot(history_df['loss'], label='loss')
+plt.legend()
+
+#evaluate the model
+nn_model.evaluate(x_test, y_test, batch_size=128)
+
